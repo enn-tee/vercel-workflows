@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Next.js 16 application demonstrating **Vercel Workflows** (powered by Inngest) with client-side polling using SWR. The app simulates a multi-step "Report Generator" workflow with real-time status updates.
+This is a Next.js 16 application demonstrating **real-time progress tracking** for long-running Vercel Workflows using Redis and client-side polling.
+
+**The Core Pattern:**
+```
+Client (SWR) → Status API → Redis ← Progress API ← Workflow Steps
+```
+
+**Key Insight:** Workflows run in isolated execution contexts and cannot share in-memory state with your Next.js application. The solution uses Redis as a shared data store that both contexts can access.
 
 ## Development Commands
 
@@ -63,11 +70,13 @@ npx workflow web
 
 ### Key Files
 
-- `app/workflows/report-generator.ts` - Main workflow with 3 steps (init, process, summarize)
-- `app/workflows/user-signup.ts` - Example workflow showing error handling patterns
-- `app/actions.ts` - Server Action to start workflows
-- `app/api/status/route.ts` - Polling endpoint for workflow status
-- `app/hooks/useWorkflow.ts` - SWR-based polling hook
+- `app/workflows/report-generator.ts` - Main workflow with 3 steps (init, process, summarize) + progress tracking step
+- `app/actions.ts` - Server Action to start workflows and map correlation IDs
+- `app/api/status/route.ts` - Polling endpoint for workflow status (reads from Redis)
+- `app/api/progress/route.ts` - API endpoint for workflow steps to store progress in Redis
+- `app/hooks/useWorkflow.ts` - SWR-based polling hook (polls every 1 second)
+- `app/lib/redis.ts` - Upstash Redis client and progress tracking helpers
+- `app/page.tsx` - Main UI with form, progress display, and result visualization
 - `next.config.ts` - Must wrap config with `withWorkflow()` from `workflow/next`
 - `tsconfig.json` - Must include `workflow` plugin in plugins array
 
@@ -102,9 +111,22 @@ await sleep("5s"); // or "30m", "1h", etc.
 - **Retryable errors**: Throw regular `Error` - steps automatically retry
 - **Non-retryable errors**: Throw `FatalError` from `workflow` package to skip retries
 
-### Progress Tracking
+### Progress Tracking with Redis
 
-Build progress arrays in the workflow and return them in the output. The status API extracts progress from `run.returnValue` when completed.
+This project uses **Upstash Redis** for real-time progress updates during workflow execution. Since workflows run in an isolated execution context (separate from the Next.js server), they cannot share in-memory state with the API routes. Redis provides a shared external storage that both contexts can access.
+
+**How it works:**
+1. Workflow calls `storeProgressInRedis()` step function to POST progress to `/api/progress`
+2. Progress API endpoint stores data in Redis with 1-hour TTL
+3. Status API reads progress from Redis (checks both runId and correlation ID)
+4. SWR on the client polls status API every 1 second for near-real-time updates
+5. When workflow completes, Redis data is cleaned up
+
+**Key implementation details:**
+- Progress tracking must use a **step function** (marked with `"use step"`) to access `fetch()`
+- The workflow function itself cannot make HTTP requests directly
+- Correlation IDs are generated client-side before the actual runId is known
+- Redis keys use prefixes: `workflow:progress:{id}` and `workflow:mapping:{id}`
 
 ## TypeScript Configuration
 
@@ -114,9 +136,26 @@ Build progress arrays in the workflow and return them in the output. The status 
 
 ## Environment Variables
 
-**Local Development**: No configuration needed - uses SQLite automatically when running `pnpm dev`.
+### Upstash Redis (Required for Progress Tracking)
 
-**Production (Vercel)**: Vercel Workflows are automatically configured when deployed. No manual setup required.
+Create a `.env.local` file in the project root with your Upstash Redis credentials:
+
+```bash
+UPSTASH_REDIS_REST_URL=https://your-database.upstash.io
+UPSTASH_REDIS_REST_TOKEN=your-token-here
+```
+
+**Setup steps:**
+1. Go to [Upstash Console](https://console.upstash.com/)
+2. Create a new Redis database (free tier available)
+3. Copy the **REST API** credentials from the database dashboard
+4. Add them to `.env.local` (see `.env.local.example` for reference)
+
+**Local Development**: Uses SQLite automatically for workflows when running `pnpm dev`.
+
+**Production (Vercel)**:
+- Vercel Workflows are automatically configured when deployed
+- Add Upstash Redis environment variables to your Vercel project settings
 
 ## Testing Workflows
 
@@ -128,8 +167,24 @@ Use `npx workflow web` during development to:
 
 ## Important Notes
 
-- No external database required - workflow state is managed by Vercel Workflows
-- Workflows run asynchronously and don't block the main application
+- Workflow state is managed by Vercel Workflows (uses SQLite locally, managed service in production)
+- Workflows run asynchronously in isolated execution context (separate from Next.js server)
 - Steps are durable - if a step fails, it retries without re-running previous steps
 - Use `"use workflow"` and `"use step"` directives exactly as shown (quoted strings)
 - The `withWorkflow()` wrapper in `next.config.ts` is required for workflow compilation
+- To make HTTP requests from a workflow, use a step function - global `fetch()` is not available in workflow functions
+
+## Troubleshooting
+
+**"EventTarget is not defined" error:**
+- Don't import libraries that use browser APIs (like EventTarget) directly in workflow code
+- Use API endpoints instead and call them from step functions
+
+**"Global fetch is unavailable in workflow functions" error:**
+- Move `fetch()` calls into a step function marked with `"use step"`
+- Step functions have full Node.js access including `fetch()`
+
+**Progress updates not appearing:**
+- Verify Upstash Redis credentials are correct in `.env.local`
+- Check that correlation ID is being passed to the workflow
+- Ensure the progress step function is being called with `await`
