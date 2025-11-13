@@ -5,6 +5,7 @@ import { z } from "zod";
 export const ReportInputSchema = z.object({
   email: z.string().email(),
   reportType: z.string(),
+  runId: z.string().optional(), // Pass runId so we can store progress
 });
 
 export type ReportInput = z.infer<typeof ReportInputSchema>;
@@ -40,8 +41,17 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
 
   // Track progress updates in an array
   const progressUpdates: ProgressUpdate[] = [];
+  const { runId } = input;
 
-  progressUpdates.push({
+  // Progress update helper that stores to Redis via step
+  const updateProgress = async (progress: ProgressUpdate) => {
+    progressUpdates.push(progress);
+    if (runId) {
+      await storeProgressInRedis(runId, progress);
+    }
+  };
+
+  await updateProgress({
     step: 1,
     totalSteps: 3,
     message: "Initializing analysis...",
@@ -51,7 +61,7 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
   // Step 1: Initialize analysis
   const metadata = await initAnalysis(input);
 
-  progressUpdates.push({
+  await updateProgress({
     step: 1,
     totalSteps: 3,
     message: "Analysis initialized",
@@ -60,7 +70,7 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
 
   await sleep("2s");
 
-  progressUpdates.push({
+  await updateProgress({
     step: 2,
     totalSteps: 3,
     message: "Processing data...",
@@ -70,7 +80,7 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
   // Step 2: Process data
   const processingResult = await processData(metadata);
 
-  progressUpdates.push({
+  await updateProgress({
     step: 2,
     totalSteps: 3,
     message: `Processed ${processingResult.dataPoints} data points`,
@@ -79,7 +89,7 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
 
   await sleep("3s");
 
-  progressUpdates.push({
+  await updateProgress({
     step: 3,
     totalSteps: 3,
     message: "Generating summary...",
@@ -89,7 +99,7 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
   // Step 3: Generate summary
   const summary = await generateSummary(processingResult);
 
-  progressUpdates.push({
+  await updateProgress({
     step: 3,
     totalSteps: 3,
     message: "Summary generated",
@@ -107,6 +117,28 @@ export async function generateReport(input: ReportInput): Promise<ReportSummary>
     completedAt: new Date().toISOString(),
     progressUpdates,
   };
+}
+
+// Step function to store progress in Redis
+async function storeProgressInRedis(runId: string, progress: ProgressUpdate): Promise<void> {
+  "use step";
+
+  try {
+    console.log(`[PROGRESS STEP] Storing progress for ${runId}:`, progress.message);
+
+    const response = await fetch("http://localhost:3000/api/progress", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId, progress }),
+    });
+
+    if (!response.ok) {
+      console.error(`[PROGRESS STEP] Failed to store progress: ${response.status}`);
+    }
+  } catch (error) {
+    console.error("[PROGRESS STEP] Error storing progress:", error);
+    // Don't throw - progress tracking shouldn't break the workflow
+  }
 }
 
 async function initAnalysis(input: ReportInput): Promise<AnalysisMetadata> {

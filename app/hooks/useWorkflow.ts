@@ -59,9 +59,12 @@ export function useWorkflow(): UseWorkflowReturn {
     setStartError(null);
 
     try {
+      // Generate a correlation ID that we'll use for progress tracking
+      const correlationId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
       // Import the server action dynamically to avoid bundling issues
       const { triggerReport } = await import("../actions");
-      const result = await triggerReport(email, reportType);
+      const result = await triggerReport(email, reportType, correlationId);
 
       if (result.error) {
         setStartError(result.error);

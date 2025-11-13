@@ -1,6 +1,7 @@
 import { getRun } from "workflow/api";
 import { NextResponse } from "next/server";
 import type { ProgressUpdate } from "@/app/workflows/report-generator";
+import { getProgress, getCorrelationId, clearProgress } from "@/app/lib/redis";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -41,43 +42,35 @@ export async function GET(request: Request) {
     let output = null;
     let progressUpdates: ProgressUpdate[] = [];
 
+    // First, try to get progress from Redis
+    // Check both the actual runId and any correlation ID mapping
+    let storedProgress = await getProgress(runId);
+
+    // If no progress found, try correlation ID mapping
+    if (storedProgress.length === 0) {
+      const correlationId = await getCorrelationId(runId);
+      if (correlationId) {
+        storedProgress = await getProgress(correlationId);
+      }
+    }
+
+    if (storedProgress.length > 0) {
+      progressUpdates = storedProgress;
+    }
+
     if (runStatus === "completed") {
       // When completed, get the final return value
       output = await run.returnValue;
-      // Extract progress updates from the completed result
-      if (output && typeof output === 'object' && 'progressUpdates' in output) {
+      // Extract progress updates from the completed result if not in Redis
+      if (progressUpdates.length === 0 && output && typeof output === 'object' && 'progressUpdates' in output) {
         progressUpdates = (output as any).progressUpdates;
       }
-    } else if (runStatus === "running") {
-      // When running, estimate progress based on elapsed time
-      // The workflow has 3 steps with sleep durations: 2s, 3s, 1s (total ~6s)
-      const createdAt = await run.createdAt;
-      const elapsedMs = Date.now() - new Date(createdAt).getTime();
-      const elapsedSec = elapsedMs / 1000;
-
-      // Estimate current step based on elapsed time
-      const totalSteps = 3;
-      let currentStep = 0;
-      let message = "Initializing analysis...";
-
-      if (elapsedSec < 2) {
-        currentStep = 1;
-        message = "Initializing analysis...";
-      } else if (elapsedSec < 5) {
-        currentStep = 2;
-        message = "Processing data...";
-      } else {
-        currentStep = 3;
-        message = "Generating summary...";
+      // Clean up the Redis progress data for completed workflows
+      await clearProgress(runId);
+      const correlationId = await getCorrelationId(runId);
+      if (correlationId) {
+        await clearProgress(correlationId);
       }
-
-      // Create synthetic progress update
-      progressUpdates.push({
-        step: currentStep,
-        totalSteps,
-        message,
-        timestamp: new Date().toISOString()
-      });
     }
 
     // Get the latest progress update
